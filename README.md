@@ -62,7 +62,7 @@ let keys = FirebasePublicKeys(
 
 ## Requirements
 
-- Swift 6.0+
+- Swift 6.3+
 - macOS 15+
 
 ## License

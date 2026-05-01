@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.3
 // Package.swift
 // Copyright 2026 Monagle Pty Ltd
 
