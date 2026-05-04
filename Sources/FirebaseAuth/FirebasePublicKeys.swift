@@ -151,7 +151,21 @@ public actor FirebasePublicKeys: Service {
 
     // MARK: - Verify
 
+    /// Minimum gap between consecutive verify-triggered refetches. Stops a
+    /// burst of bogus tokens from hammering the JWKS endpoint while still
+    /// allowing fast recovery after a real Google key rotation.
+    public static let verifyRetryRefetchCooldown: TimeInterval = 30
+
     /// Verify a token and return the parsed payload.
+    ///
+    /// On verification failure, refetches the JWKS once and retries — Google
+    /// rotates Firebase signing keys periodically and the in-memory cache
+    /// can lag the rotation by up to the refresh interval (~7h based on the
+    /// JWKS Cache-Control header). A single retry covers that race; further
+    /// failures throw the original error.
+    ///
+    /// Refetches are rate-limited via ``verifyRetryRefetchCooldown`` so a
+    /// burst of bogus tokens can't DoS the JWKS endpoint.
     ///
     /// - Parameter token: The raw JWT string (without `Bearer ` prefix).
     /// - Returns: A verified `FirebaseIDToken`.
@@ -159,9 +173,37 @@ public actor FirebasePublicKeys: Service {
     ///   or ``FirebaseAuthError/audienceMismatch(expected:actual:)`` if the
     ///   token's audience doesn't match the configured project ID.
     public func verify(_ token: String) async throws -> FirebaseIDToken {
+        do {
+            return try await verifyOnce(token)
+        } catch {
+            // Cooldown gate — don't hammer JWKS if we just refreshed.
+            guard shouldRetryAfterRefetch() else { throw error }
+
+            logger.debug(
+                "Token verify failed; refetching JWKS and retrying once",
+                metadata: ["error": "\(error)"]
+            )
+            do {
+                try await prefetch()
+            } catch {
+                // Refetch itself failed — surface the ORIGINAL verify error,
+                // it's the more actionable signal for the caller.
+                throw error
+            }
+
+            return try await verifyOnce(token)
+        }
+    }
+
+    private func verifyOnce(_ token: String) async throws -> FirebaseIDToken {
         let payload: FirebaseIDToken = try await keys.verify(token, as: FirebaseIDToken.self)
         try payload.verify(projectId: projectId)
         return payload
+    }
+
+    private func shouldRetryAfterRefetch() -> Bool {
+        guard let last = lastRefreshAt else { return true }
+        return Date().timeIntervalSince(last) > Self.verifyRetryRefetchCooldown
     }
 
     // MARK: - Internals
